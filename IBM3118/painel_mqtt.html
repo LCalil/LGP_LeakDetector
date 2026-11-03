@@ -1,0 +1,416 @@
+<!doctype html>
+<html lang="pt-BR">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Painel MQTT – Detector</title>
+<script src="https://unpkg.com/mqtt@5.10.1/dist/mqtt.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/Chart.js/4.4.1/chart.umd.min.js"></script>
+<style>
+  :root {
+    --bg: #f4f5f7; --card: #ffffff; --text: #1c1f24; --muted: #6b7280;
+    --border: #e3e5e9; --accent: #2563eb; --grid: #eceef1;
+    --safe: #16a34a; --gas: #d97706; --fire: #dc2626; --off: #9ca3af;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root:not([data-theme="light"]) {
+      --bg: #101215; --card: #191c21; --text: #e8eaed; --muted: #9aa0a8;
+      --border: #2a2e35; --accent: #60a5fa; --grid: #23272d;
+      --safe: #22c55e; --gas: #f59e0b; --fire: #f87171; --off: #6b7280;
+    }
+  }
+  :root[data-theme="dark"] {
+    --bg: #101215; --card: #191c21; --text: #e8eaed; --muted: #9aa0a8;
+    --border: #2a2e35; --accent: #60a5fa; --grid: #23272d;
+    --safe: #22c55e; --gas: #f59e0b; --fire: #f87171; --off: #6b7280;
+  }
+  * { box-sizing: border-box; }
+  body {
+    margin: 0; background: var(--bg); color: var(--text);
+    font: 14px/1.45 system-ui, -apple-system, "Segoe UI", Roboto, sans-serif;
+  }
+  header { padding: 18px 16px 6px; max-width: 1200px; margin: 0 auto; }
+  header h1 { margin: 0; font-size: 20px; }
+  header p { margin: 4px 0 0; color: var(--muted); }
+  main { max-width: 1200px; margin: 0 auto; padding: 10px 16px 40px; display: grid; gap: 14px; }
+  .card { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 14px; }
+  .card h2 { margin: 0 0 10px; font-size: 14px; color: var(--muted); font-weight: 600; text-transform: uppercase; letter-spacing: .03em; }
+  .form { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(180px, 1fr)); align-items: end; }
+  label { display: grid; gap: 4px; font-size: 12px; color: var(--muted); }
+  input {
+    width: 100%; padding: 8px 10px; border: 1px solid var(--border); border-radius: 7px;
+    background: var(--bg); color: var(--text); font: inherit;
+  }
+  button {
+    padding: 8px 14px; border-radius: 7px; border: 1px solid var(--border);
+    background: var(--card); color: var(--text); font: inherit; cursor: pointer;
+  }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; }
+  button:disabled { opacity: .5; cursor: not-allowed; }
+  .row { display: flex; gap: 8px; flex-wrap: wrap; align-items: center; }
+  .conn { display: inline-flex; align-items: center; gap: 6px; font-size: 13px; color: var(--muted); }
+  .dot { width: 9px; height: 9px; border-radius: 50%; background: var(--off); display: inline-block; }
+  .stats { display: grid; gap: 10px; grid-template-columns: repeat(auto-fit, minmax(150px, 1fr)); }
+  .stat { background: var(--card); border: 1px solid var(--border); border-radius: 10px; padding: 12px; }
+  .stat .k { font-size: 12px; color: var(--muted); }
+  .stat .v { font-size: 22px; font-weight: 650; margin-top: 2px; font-variant-numeric: tabular-nums; }
+  .stat .s { font-size: 12px; color: var(--muted); margin-top: 2px; }
+  .state-SAFE { color: var(--safe); } .state-GAS { color: var(--gas); }
+  .state-FIRE, .state-FIRE_GAS { color: var(--fire); }
+  .grid2 { display: grid; gap: 14px; grid-template-columns: repeat(auto-fit, minmax(340px, 1fr)); }
+  .chart-box { position: relative; height: 240px; }
+  table { width: 100%; border-collapse: collapse; font-size: 13px; }
+  th, td { text-align: left; padding: 6px 8px; border-bottom: 1px solid var(--border); white-space: nowrap; }
+  th { color: var(--muted); font-weight: 600; }
+  .scroll { max-height: 240px; overflow: auto; }
+  pre.log {
+    margin: 0; max-height: 240px; overflow: auto; font: 12px/1.5 ui-monospace, Menlo, Consolas, monospace;
+    background: var(--bg); border-radius: 7px; padding: 8px; white-space: pre-wrap; word-break: break-all;
+  }
+  .muted { color: var(--muted); }
+  .lat { font-variant-numeric: tabular-nums; }
+  @media (max-width: 420px) { .grid2 { grid-template-columns: 1fr; } }
+</style>
+</head>
+<body>
+<header>
+  <h1>Painel MQTT – Smart Smoke and Fire Detection</h1>
+  <p>Acompanha em tempo real a telemetria, os alertas e os comandos do dispositivo.</p>
+</header>
+
+<main>
+  <section class="card">
+    <h2>Conexão</h2>
+    <div class="form">
+      <label>Broker (WebSocket)
+        <input id="url" value="wss://broker.hivemq.com:8884/mqtt">
+      </label>
+      <label>Tópico base
+        <input id="base" value="smartkitchen">
+      </label>
+      <label>ID do dispositivo (vazio = detectar)
+        <input id="devIn" placeholder="esp32-a1b2c3">
+      </label>
+      <label>Usuário (opcional)
+        <input id="user" autocomplete="off">
+      </label>
+      <label>Senha (opcional)
+        <input id="pass" type="password" autocomplete="off">
+      </label>
+      <label>Limite de gás no gráfico
+        <input id="thr" type="number" value="1300">
+      </label>
+    </div>
+    <div class="row" style="margin-top:12px">
+      <button class="primary" id="btnConn">Conectar</button>
+      <button id="btnDisc" disabled>Desconectar</button>
+      <span class="conn"><span class="dot" id="connDot"></span><span id="connTxt">Desconectado</span></span>
+    </div>
+  </section>
+
+  <section class="stats">
+    <div class="stat"><div class="k">Dispositivo</div><div class="v" id="sDev" style="font-size:16px">—</div><div class="s" id="sOnline">aguardando</div></div>
+    <div class="stat"><div class="k">Estado</div><div class="v" id="sState">—</div><div class="s" id="sSeen">sem dados</div></div>
+    <div class="stat"><div class="k">Gás</div><div class="v" id="sGas">—</div><div class="s" id="sGasReady">—</div></div>
+    <div class="stat"><div class="k">Chama</div><div class="v" id="sFlame">—</div><div class="s">sensor IR</div></div>
+    <div class="stat"><div class="k">Sinal Wi-Fi</div><div class="v" id="sRssi">—</div><div class="s">RSSI</div></div>
+    <div class="stat"><div class="k">Tempo ligado</div><div class="v" id="sUp">—</div><div class="s">uptime</div></div>
+  </section>
+
+  <section class="card">
+    <h2>Comandos e latência</h2>
+    <div class="row">
+      <button id="btnTest" disabled>Enviar "test" (bipe de 1 s)</button>
+      <button id="btnStatus" disabled>Enviar "status"</button>
+      <label style="display:flex;align-items:center;gap:6px;flex-direction:row">Repetições
+        <input id="latN" type="number" value="20" min="1" max="200" style="width:80px">
+      </label>
+      <button id="btnLat" disabled>Medir latência</button>
+      <button id="btnCsv">Exportar telemetria (CSV)</button>
+    </div>
+    <p class="lat" id="latInfo" style="margin:10px 0 0">A latência é o tempo de ida e volta: o painel envia "status" e mede quanto tempo o dispositivo leva para responder.</p>
+  </section>
+
+  <section class="grid2">
+    <div class="card"><h2 id="gasTitle">Gás (mV)</h2><div class="chart-box"><canvas id="gasChart"></canvas></div></div>
+    <div class="card"><h2>Estado</h2><div class="chart-box"><canvas id="stateChart"></canvas></div></div>
+    <div class="card"><h2>Sinal Wi-Fi (dBm)</h2><div class="chart-box"><canvas id="rssiChart"></canvas></div></div>
+    <div class="card"><h2>Latência MQTT (ms)</h2><div class="chart-box"><canvas id="latChart"></canvas></div></div>
+  </section>
+
+  <section class="grid2">
+    <div class="card">
+      <h2>Alertas</h2>
+      <div class="scroll">
+        <table><thead><tr><th>Hora</th><th>Evento</th><th>Gás</th><th>Chama</th></tr></thead><tbody id="alerts"></tbody></table>
+      </div>
+    </div>
+    <div class="card">
+      <h2>Mensagens recebidas</h2>
+      <pre class="log" id="log"><span class="muted">Nenhuma mensagem ainda.</span></pre>
+    </div>
+  </section>
+</main>
+
+<script>
+const $ = id => document.getElementById(id);
+const STATES = ["SAFE", "GAS", "FIRE", "FIRE_GAS"];
+const STATE_PT = { SAFE: "Seguro", GAS: "Gás", FIRE: "Fogo", FIRE_GAS: "Fogo + gás" };
+const MAX_PTS = 300;
+
+let client = null, deviceId = null, base = "smartkitchen";
+let lastSeen = 0, gasUnit = "mV";
+let telemetryRows = [];
+let pendingLatency = null;
+let latRun = 0;
+
+// ---------- Preferências (apenas neste navegador) ----------
+const FIELDS = ["url", "base", "devIn", "user", "thr"];
+try {
+  const cfg = JSON.parse(localStorage.getItem("painelMqttCfg") || "{}");
+  FIELDS.forEach(f => { if (cfg[f] !== undefined) $(f).value = cfg[f]; });
+} catch (e) {}
+function saveCfg() {
+  try {
+    const cfg = {}; FIELDS.forEach(f => cfg[f] = $(f).value);
+    localStorage.setItem("painelMqttCfg", JSON.stringify(cfg));
+  } catch (e) {}
+}
+
+// ---------- Gráficos ----------
+const css = n => getComputedStyle(document.documentElement).getPropertyValue(n).trim();
+function baseOpts(extra = {}) {
+  return {
+    animation: false, responsive: true, maintainAspectRatio: false,
+    interaction: { mode: "index", intersect: false },
+    plugins: { legend: { labels: { color: css("--text"), boxWidth: 12 } } },
+    scales: {
+      x: { ticks: { color: css("--muted"), maxTicksLimit: 6, maxRotation: 0 }, grid: { color: css("--grid") } },
+      y: { ticks: { color: css("--muted") }, grid: { color: css("--grid") }, ...(extra.y || {}) }
+    }
+  };
+}
+const gasChart = new Chart($("gasChart"), {
+  type: "line",
+  data: { labels: [], datasets: [
+    { label: "Gás", data: [], borderColor: css("--accent"), backgroundColor: css("--accent"), pointRadius: 0, borderWidth: 2, tension: .25 },
+    { label: "Limite", data: [], borderColor: css("--fire"), borderDash: [6, 4], pointRadius: 0, borderWidth: 1.5 }
+  ]},
+  options: baseOpts()
+});
+const stateChart = new Chart($("stateChart"), {
+  type: "line",
+  data: { labels: [], datasets: [
+    { label: "Estado", data: [], stepped: true, borderColor: css("--fire"), backgroundColor: css("--fire"), pointRadius: 0, borderWidth: 2 }
+  ]},
+  options: baseOpts({ y: { min: 0, max: 3, ticks: { stepSize: 1, color: css("--muted"), callback: v => STATE_PT[STATES[v]] || "" } } })
+});
+const rssiChart = new Chart($("rssiChart"), {
+  type: "line",
+  data: { labels: [], datasets: [
+    { label: "RSSI", data: [], borderColor: css("--safe"), backgroundColor: css("--safe"), pointRadius: 0, borderWidth: 2, tension: .25 }
+  ]},
+  options: baseOpts()
+});
+const latChart = new Chart($("latChart"), {
+  type: "bar",
+  data: { labels: [], datasets: [
+    { label: "Ida e volta", data: [], backgroundColor: css("--accent") }
+  ]},
+  options: baseOpts({ y: { beginAtZero: true } })
+});
+
+function pushPoint(chart, label, values) {
+  chart.data.labels.push(label);
+  values.forEach((v, i) => chart.data.datasets[i].data.push(v));
+  if (chart.data.labels.length > MAX_PTS) {
+    chart.data.labels.shift();
+    chart.data.datasets.forEach(d => d.data.shift());
+  }
+  chart.update("none");
+}
+const hhmmss = d => d.toLocaleTimeString("pt-BR", { hour12: false });
+
+// ---------- Interface ----------
+function setConn(text, color) {
+  $("connTxt").textContent = text;
+  $("connDot").style.background = color ? css(color) : css("--off");
+}
+function setButtons() {
+  const ok = client && client.connected;
+  $("btnConn").disabled = !!client;
+  $("btnDisc").disabled = !client;
+  ["btnTest", "btnStatus", "btnLat"].forEach(b => $(b).disabled = !(ok && deviceId));
+}
+function setState(s) {
+  const el = $("sState");
+  el.textContent = STATE_PT[s] || s;
+  el.className = "v state-" + s;
+}
+function fmtUptime(sec) {
+  const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+  return h ? `${h}h ${m}min` : m ? `${m}min ${s}s` : `${s}s`;
+}
+function logRaw(topic, text) {
+  const log = $("log");
+  if (log.querySelector(".muted")) log.textContent = "";
+  log.textContent = `[${hhmmss(new Date())}] ${topic}\n  ${text}\n` + log.textContent;
+  if (log.textContent.length > 20000) log.textContent = log.textContent.slice(0, 20000);
+}
+function addAlert(ev) {
+  const tr = document.createElement("tr");
+  const gas = ev.gas_mv ?? ev.gas ?? "—";
+  tr.innerHTML = `<td>${hhmmss(new Date())}</td><td class="state-${ev.event}">${STATE_PT[ev.event] || ev.event}</td>` +
+                 `<td>${gas}</td><td>${ev.flame ? "Sim" : "Não"}</td>`;
+  $("alerts").prepend(tr);
+}
+
+setInterval(() => {
+  if (!lastSeen) return;
+  const ago = Math.round((Date.now() - lastSeen) / 1000);
+  $("sSeen").textContent = ago > 15 ? `sem dados há ${ago}s` : `atualizado há ${ago}s`;
+  $("sSeen").style.color = ago > 15 ? css("--fire") : "";
+}, 1000);
+
+// ---------- MQTT ----------
+function handleMessage(topic, payload) {
+  const parts = topic.split("/");
+  if (parts.length < 3) return;
+  const id = parts[1], kind = parts.slice(2).join("/");
+  const text = payload.toString();
+
+  if (!deviceId) {
+    deviceId = id;
+    $("sDev").textContent = id;
+    setButtons();
+  }
+  logRaw(topic, text);
+  if (id !== deviceId) return;
+
+  if ((kind === "state" || kind === "telemetry") && pendingLatency) pendingLatency();
+
+  if (kind === "telemetry") {
+    let d; try { d = JSON.parse(text); } catch (e) { return; }
+    const now = new Date();
+    lastSeen = now.getTime();
+    const gas = d.gas_mv ?? d.gas;
+    gasUnit = d.gas_mv !== undefined ? "mV" : "ADC";
+    $("gasTitle").textContent = `Gás (${gasUnit})`;
+    $("sGas").textContent = gas !== undefined ? `${gas} ${gasUnit}` : "—";
+    $("sGasReady").textContent = d.gas_ready ? "sensor aquecido" : "aquecendo…";
+    $("sFlame").textContent = d.flame ? "Sim" : "Não";
+    $("sFlame").style.color = d.flame ? css("--fire") : "";
+    $("sRssi").textContent = d.rssi !== undefined ? `${d.rssi} dBm` : "—";
+    $("sUp").textContent = d.uptime !== undefined ? fmtUptime(d.uptime) : "—";
+    if (d.state) setState(d.state);
+
+    const t = hhmmss(now);
+    pushPoint(gasChart, t, [gas, Number($("thr").value)]);
+    pushPoint(stateChart, t, [Math.max(0, STATES.indexOf(d.state))]);
+    pushPoint(rssiChart, t, [d.rssi]);
+    telemetryRows.push([now.toISOString(), id, gas, d.gas_ready, d.flame, d.state, d.rssi, d.uptime]);
+  } else if (kind === "state") {
+    setState(text);
+    pushPoint(stateChart, hhmmss(new Date()), [Math.max(0, STATES.indexOf(text))]);
+  } else if (kind === "alert") {
+    try { addAlert(JSON.parse(text)); } catch (e) {}
+  } else if (kind === "online") {
+    const on = text === "online";
+    $("sOnline").textContent = on ? "online" : "offline";
+    $("sOnline").style.color = on ? css("--safe") : css("--fire");
+  }
+}
+
+$("btnConn").onclick = () => {
+  saveCfg();
+  base = $("base").value.trim() || "smartkitchen";
+  deviceId = $("devIn").value.trim() || null;
+  $("sDev").textContent = deviceId || "detectando…";
+
+  const opts = {
+    clientId: "painel-" + Math.random().toString(16).slice(2, 10),
+    clean: true, reconnectPeriod: 3000, connectTimeout: 8000
+  };
+  if ($("user").value) { opts.username = $("user").value; opts.password = $("pass").value; }
+
+  setConn("Conectando…", "--gas");
+  try {
+    client = mqtt.connect($("url").value.trim(), opts);
+  } catch (e) {
+    setConn("Erro: " + e.message, "--fire"); client = null; setButtons(); return;
+  }
+  client.on("connect", () => {
+    setConn("Conectado ao broker", "--safe");
+    const topic = deviceId ? `${base}/${deviceId}/#` : `${base}/+/#`;
+    client.subscribe(topic, { qos: 0 });
+    setButtons();
+  });
+  client.on("reconnect", () => setConn("Reconectando…", "--gas"));
+  client.on("close", () => { if (client) setConn("Conexão perdida", "--fire"); setButtons(); });
+  client.on("error", err => setConn("Erro: " + err.message, "--fire"));
+  client.on("message", handleMessage);
+  setButtons();
+};
+
+$("btnDisc").onclick = () => {
+  if (client) client.end(true);
+  client = null;
+  setConn("Desconectado");
+  setButtons();
+};
+
+const sendCmd = cmd => client && deviceId && client.publish(`${base}/${deviceId}/cmd`, cmd);
+$("btnTest").onclick = () => sendCmd("test");
+$("btnStatus").onclick = () => sendCmd("status");
+
+// ---------- Latência (ida e volta) ----------
+$("btnLat").onclick = async () => {
+  const n = Math.min(200, Math.max(1, parseInt($("latN").value) || 20));
+  $("btnLat").disabled = true;
+  latChart.data.labels = []; latChart.data.datasets[0].data = [];
+  const ok = [];
+  let lost = 0;
+  for (let i = 0; i < n; i++) {
+    if (!client || !client.connected) break;
+    const rtt = await new Promise(resolve => {
+      const t0 = performance.now();
+      const timer = setTimeout(() => { pendingLatency = null; resolve(null); }, 5000);
+      pendingLatency = () => { clearTimeout(timer); pendingLatency = null; resolve(performance.now() - t0); };
+      sendCmd("status");
+    });
+    if (rtt === null) lost++; else ok.push(rtt);
+    pushPoint(latChart, String(i + 1), [rtt === null ? null : Math.round(rtt)]);
+    $("latInfo").textContent = `Medindo… ${i + 1}/${n}`;
+    await new Promise(r => setTimeout(r, 600));
+  }
+  if (ok.length) {
+    const mean = ok.reduce((a, b) => a + b, 0) / ok.length;
+    const sd = Math.sqrt(ok.reduce((a, b) => a + (b - mean) ** 2, 0) / ok.length);
+    const sorted = [...ok].sort((a, b) => a - b);
+    const med = sorted[Math.floor(sorted.length / 2)];
+    $("latInfo").textContent =
+      `${ok.length} respostas, ${lost} sem resposta. Média ${mean.toFixed(0)} ms · ` +
+      `mediana ${med.toFixed(0)} ms · mín ${sorted[0].toFixed(0)} ms · máx ${sorted.at(-1).toFixed(0)} ms · ` +
+      `desvio padrão ${sd.toFixed(0)} ms`;
+  } else {
+    $("latInfo").textContent = "Nenhuma resposta recebida. Confira se o dispositivo está online.";
+  }
+  setButtons();
+};
+
+// ---------- Exportar CSV ----------
+$("btnCsv").onclick = () => {
+  if (!telemetryRows.length) { alert("Ainda não há telemetria para exportar."); return; }
+  const head = `timestamp,device,gas_${gasUnit.toLowerCase()},gas_ready,flame,state,rssi_dbm,uptime_s`;
+  const csv = [head, ...telemetryRows.map(r => r.join(","))].join("\n");
+  const a = document.createElement("a");
+  a.href = URL.createObjectURL(new Blob([csv], { type: "text/csv" }));
+  a.download = `telemetria_${new Date().toISOString().slice(0, 19).replace(/[:T]/g, "-")}.csv`;
+  a.click();
+  URL.revokeObjectURL(a.href);
+};
+
+setButtons();
+</script>
+</body>
+</html>
