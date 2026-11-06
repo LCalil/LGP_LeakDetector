@@ -1,8 +1,13 @@
 /*
- * IoT-Based Smart Smoke and Fire Detection System — ESP32-WROVER-DEV
+ * IoT-Based Smart Smoke and Fire Detection System — ESP32-S3 Zero
+ * Arduino IDE: placa ESP32S3 Dev Module; USB CDC On Boot: Enabled.
+ * Dependencia: PubSubClient (Nick O'Leary).
+ * Preencha WIFI_SSID e WIFI_PASS antes de gravar.
+ * Mantem LED externo; nao usa o RGB integrado.
  * Com Botão de Pânico/Silenciamento do Buzzer e Alerta para os Bombeiros
  */
 
+#include <Arduino.h>
 #include <WiFi.h>
 #include <PubSubClient.h>
 
@@ -15,25 +20,34 @@ const char*    MQTT_USER   = "";                  // deixe vazio se o broker nã
 const char*    MQTT_PASS   = "";
 const char*    TOPICO_BASE = "smartkitchen";
 
-// ---------------- Pinos ----------------
-const uint8_t PINO_LED     = 14;
-const uint8_t PINO_BUZZER  = 33;
+// ---------------- Pinos ESP32-S3 Zero ----------------
+// LED EXTERNO: GPIO10 -> resistor de 330 ohms -> anodo; catodo -> GND.
+// O LED RGB integrado (GPIO21 na Waveshare) nao e usado por este codigo.
+// MQ-135: AO -> divisor de tensao -> GPIO1 (ADC1).
+// Exemplo para AO de ate 5 V: AO -> 10k -> GPIO1 -> 10k -> GND.
+// Com esse divisor, a leitura e metade da tensao de AO; os limites usam mV no GPIO.
+// Nunca aplique 5 V em um GPIO. Adapte tambem DO do sensor de chama,
+// se esse sinal tiver nivel de 5 V. Todos os modulos devem compartilhar GND.
+// Botao externo entre GPIO4 e GND; nao e o botao BOOT da placa.
+const uint8_t PINO_LED     = 10;
+const uint8_t PINO_BUZZER  = 12;
 const uint8_t PINO_CHAMA   = 13;
-const uint8_t PINO_MQ135   = 32;   // ADC1
+const uint8_t PINO_MQ135   = 1;    // ADC1 no ESP32-S3
 const uint8_t PINO_BOTAO   = 4;    // Botão de silenciamento e alerta para bombeiros
 
 // ---------------- Configurações ----------------
 #define BUZZER_PASSIVO     false  // true = buzzer passivo (tone); false = buzzer ativo
 #define CHAMA_ATIVA_EM_LOW true   // módulos com LM393 normalmente vão a LOW ao ver chama
 
-// O ESP32 lê o MQ-135 já convertido em milivolts (0–3300 mV aprox.)
-const int LIMITE_GAS_MV    = 1300; // tensão no pino que dispara o alerta — calibre!
-const int HISTERESE_GAS_MV = 100;  // margem para desligar o alerta
+// Leitura em milivolts no GPIO1, apos eventual divisor (ADC: ate ~3100 mV).
+const int LEITURAS_CALIBRACAO = 50;
+const int MARGEM_ALARME_MV = 80;  // dispara em media inicial + 80 mV
+const int HISTERESE_GAS_MV = 20;  // desliga em media inicial + 60 mV
 
 const unsigned long AQUECIMENTO_MS        = 60000; // aquecimento do MQ-135 (chama funciona durante)
 const unsigned long INTERVALO_GAS        = 1000;  // leitura do MQ-135
 const unsigned long DEBOUNCE_CHAMA_MS    = 200;   // chama precisa ficar estável por esse tempo
-const unsigned long INTERVALO_TELEMETRIA = 5000;  // publicação periódica
+const unsigned long INTERVALO_TELEMETRIA = 1000;  // publicação periódica
 const unsigned long INTERVALO_RECONEXAO  = 5000;  // nova tentativa de conexão ao broker
 const unsigned long DEBOUNCE_BOTAO_MS    = 50;    // debounce para o botão físico
 const int AMOSTRAS_MQ = 16;
@@ -41,6 +55,7 @@ const int FREQ_BUZZER = 2000;                     // Hz (só buzzer passivo)
 
 // ---------------- Estado ----------------
 enum Estado { SEGURO, ALERTA_GAS, ALERTA_FOGO, ALERTA_FOGO_GAS };
+Estado calcularEstado(); // Prototipo explicito para o preprocessador Arduino
 const char* NOMES_ESTADO[] = { "SAFE", "GAS", "FIRE", "FIRE_GAS" };
 
 WiFiClient   wifiClient;
@@ -52,6 +67,9 @@ char topTelemetria[64], topEstado[64], topAlerta[64], topOnline[64], topCmd[64],
 int  gasMv      = 0;
 bool gasPronto = false;
 bool alarmeGas = false;
+int leiturasCalibracao[LEITURAS_CALIBRACAO];
+int totalLeiturasCalibracao = 0;
+float gasSafeMv = 0.0f; // referencia fixa ate reiniciar a placa
 
 bool chama = false;
 bool leituraChamaAnterior = false;
@@ -97,34 +115,74 @@ bool lerChamaBruta() {
 }
 
 void atualizarChama(unsigned long agora) {
+  static bool chamaEstavel = false;
+  static unsigned long ultimaDeteccao = 0;
+
   bool leitura = lerChamaBruta();
+
   if (leitura != leituraChamaAnterior) {
     leituraChamaAnterior = leitura;
     tMudancaChama = agora;
   }
-  if (leitura != chama && agora - tMudancaChama >= DEBOUNCE_CHAMA_MS) {
-    chama = leitura;
-    Serial.println(chama ? F("!!! CHAMA DETECTADA !!!") : F("Chama não detectada."));
+
+  // Confirma a mudança após 200 ms de sinal estável.
+  if (agora - tMudancaChama >= DEBOUNCE_CHAMA_MS) {
+    chamaEstavel = leitura;
+  }
+
+  if (chamaEstavel) {
+    ultimaDeteccao = agora;
+
+    if (!chama) {
+      chama = true;
+      Serial.println(F("!!! CHAMA DETECTADA !!!"));
+    }
+  }
+
+  // Mantém o alerta por mais 10 segundos após a detecção terminar.
+  if (chama && !chamaEstavel &&
+      agora - ultimaDeteccao >= 10000UL) {
+    chama = false;
+    Serial.println(F("Alerta de chama encerrado."));
   }
 }
 
 void atualizarGas(unsigned long agora) {
-  if (!gasPronto && agora >= AQUECIMENTO_MS) {
-    gasPronto = true;
-    Serial.println(F("MQ-135 aquecido e pronto."));
-  }
   if (agora - tGas < INTERVALO_GAS) return;
   tGas = agora;
-
   gasMv = lerMQ135mV();
-  if (!gasPronto) return;              // durante o aquecimento a leitura não dispara alarme
 
-  if (!alarmeGas && gasMv >= LIMITE_GAS_MV) {
+  // Aquecimento: leituras apenas para acompanhamento, sem alarme de gas.
+  if (agora < AQUECIMENTO_MS) return;
+
+  // Cada leitura e a media das 16 amostras do ADC de lerMQ135mV().
+  // Coleta uma leitura por segundo, sem bloquear chama, botao ou MQTT.
+  if (!gasPronto) {
+    leiturasCalibracao[totalLeiturasCalibracao++] = gasMv;
+    Serial.printf("Calibrando MQ-135: %d/%d | %d mV\n",
+                  totalLeiturasCalibracao, LEITURAS_CALIBRACAO, gasMv);
+
+    if (totalLeiturasCalibracao == LEITURAS_CALIBRACAO) {
+      long soma = 0;
+      for (int i = 0; i < LEITURAS_CALIBRACAO; i++) {
+        soma += leiturasCalibracao[i];
+      }
+      gasSafeMv = (float)soma / LEITURAS_CALIBRACAO;
+      gasPronto = true;
+      Serial.printf("Calibracao concluida. SAFE: %.2f mV | Alarme: %.2f mV | Desliga: %.2f mV\n",
+                    gasSafeMv, gasSafeMv + MARGEM_ALARME_MV,
+                    gasSafeMv + MARGEM_ALARME_MV - HISTERESE_GAS_MV);
+    }
+    return;
+  }
+
+  const float limiteAlarmeMv = gasSafeMv + MARGEM_ALARME_MV;
+  if (!alarmeGas && gasMv >= limiteAlarmeMv) {
     alarmeGas = true;
-    Serial.println(F("!!! GÁS/FUMAÇA ACIMA DO LIMITE !!!"));
-  } else if (alarmeGas && gasMv <= LIMITE_GAS_MV - HISTERESE_GAS_MV) {
+    Serial.println(F("!!! GAS/FUMACA: 80 mV OU MAIS ACIMA DA REFERENCIA !!!"));
+  } else if (alarmeGas && gasMv <= limiteAlarmeMv - HISTERESE_GAS_MV) {
     alarmeGas = false;
-    Serial.println(F("Nível de gás normalizado."));
+    Serial.println(F("Nivel de gas normalizado."));
   }
 }
 
@@ -146,8 +204,12 @@ void publicarAlertaBombeiros() {
            "{\"emergency\":\"FIRE_DEPARTMENT_ALERT\",\"state\":\"%s\",\"gas_mv\":%d,\"flame\":%s,\"timestamp\":%lu}",
            NOMES_ESTADO[estado], gasMv, chama ? "true" : "false", millis() / 1000);
   
-  mqtt.publish(topBombeiros, msg);
-  Serial.println(F("🚨 ALERTA MANUAL ENVIADO AOS BOMBEIROS VIA MQTT! 🚨"));
+  // Publicar neste topico nao aciona um servico real de emergencia.
+  if (mqtt.publish(topBombeiros, msg)) {
+    Serial.println(F("Alerta manual publicado no topico MQTT."));
+  } else {
+    Serial.println(F("Falha ao publicar o alerta manual no MQTT."));
+  }
 }
 
 void atualizarBotao(unsigned long agora) {
@@ -198,7 +260,7 @@ void atualizarSaidas(unsigned long agora) {
       break;
     }
     case SEGURO:
-      if (!gasPronto) led = (agora / 1000) % 2;  // aquecendo
+      if (!gasPronto) led = (agora / 1000) % 2;  // aquecendo ou calibrando
       else            led = (agora % 3000) < 50; // heartbeat
       break;
   }
@@ -301,9 +363,10 @@ void setup() {
   pinMode(PINO_BOTAO, INPUT_PULLUP); // Botão com pull-up interno (pressionado = LOW)
   
   digitalWrite(PINO_LED, LOW);
+  digitalWrite(PINO_BUZZER, LOW);
   setBuzzer(false);
 
-  // ADC do ESP32: 12 bits e atenuação de 11 dB (faixa até ~3,3 V)
+  // ADC do ESP32-S3: 12 bits, atenuacao de 11 dB (ate ~3,1 V)
   analogReadResolution(12);
   analogSetPinAttenuation(PINO_MQ135, ADC_11db);
 
@@ -319,9 +382,10 @@ void setup() {
   snprintf(topBombeiros,  sizeof(topBombeiros),  "%s/%s/bombeiros", TOPICO_BASE, idDispositivo);
 
   Serial.println();
-  Serial.println(F("=== Smart Smoke and Fire Detection (ESP32) + Silenciador ==="));
+  Serial.println(F("=== Smart Smoke and Fire Detection (ESP32-S3 Zero) + Silenciador ==="));
   Serial.printf("ID do dispositivo: %s\n", idDispositivo);
   Serial.printf("Tópicos em: %s/%s/#\n", TOPICO_BASE, idDispositivo);
+  Serial.println(F("Depois do aquecimento: 50 leituras, uma por segundo, para definir o SAFE. Calibre em ar limpo."));
   Serial.printf("Aquecendo o MQ-135 por %lu s (sensor de chama já ativo).\n", AQUECIMENTO_MS / 1000);
 
   WiFi.setAutoReconnect(true);
@@ -361,8 +425,8 @@ void loop() {
   if (agora - tTelemetria >= INTERVALO_TELEMETRIA) {
     tTelemetria = agora;
     publicarTelemetria();
-    Serial.printf("MQ-135: %4d mV | Chama: %s | Estado: %s | MQTT: %s\n",
-                  gasMv, chama ? "SIM" : "não", NOMES_ESTADO[estado],
+    Serial.printf("MQ-135: %4d mV | SAFE: %.2f mV | Calibrado: %s | Chama: %s | Estado: %s | MQTT: %s\n",
+                  gasMv, gasSafeMv, gasPronto ? "SIM" : "NAO", chama ? "SIM" : "não", NOMES_ESTADO[estado],
                   mqtt.connected() ? "conectado" : "offline");
   }
 }
