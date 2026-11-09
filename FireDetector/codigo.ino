@@ -12,8 +12,8 @@
 #include <PubSubClient.h>
 
 // ---------------- Rede ----------------
-const char*    WIFI_SSID   = "SUA_REDE";          // o ESP32 só conecta em redes 2,4 GHz
-const char*    WIFI_PASS   = "SUA_SENHA";
+const char*    WIFI_SSID   = "Bumblebee";          // o ESP32 só conecta em redes 2,4 GHz
+const char*    WIFI_PASS   = "regularidade3r";
 const char*    MQTT_HOST   = "broker.hivemq.com"; // broker público para testes
 const uint16_t MQTT_PORT   = 1883;
 const char*    MQTT_USER   = "";                  // deixe vazio se o broker não exige login
@@ -29,9 +29,9 @@ const char*    TOPICO_BASE = "smartkitchen";
 // Nunca aplique 5 V em um GPIO. Adapte tambem DO do sensor de chama,
 // se esse sinal tiver nivel de 5 V. Todos os modulos devem compartilhar GND.
 // Botao externo entre GPIO4 e GND; nao e o botao BOOT da placa.
-const uint8_t PINO_LED     = 10;
-const uint8_t PINO_BUZZER  = 12;
-const uint8_t PINO_CHAMA   = 13;
+const uint8_t PINO_LED    = 9;
+const uint8_t PINO_BUZZER = 13;
+const uint8_t PINO_CHAMA  = 11;
 const uint8_t PINO_MQ135   = 1;    // ADC1 no ESP32-S3
 const uint8_t PINO_BOTAO   = 4;    // Botão de silenciamento e alerta para bombeiros
 
